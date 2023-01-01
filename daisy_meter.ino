@@ -10,38 +10,41 @@
 #include <WiFiClient.h>
 #include "secrets.h"
 
-int samplethresh = 50;
-int movementthresh = 15;
-int timeout = 30 * 1000;
+#define SAMPLE_RATE 50
+#define SAMPLE_DETECT_THRESHOLD 15
+#define SAMPLES_PER_TRIGGER 50
+#define SAMPLES_RESET_TIMEOUT 30*1000
 
-int outpins[] = { D1, D2, D3, D4, D5 };
-#define npins 5
-int val[npins] = {0};
-int diff[npins] = {0};
-int last[npins] = {0};
-int samples[1024] = {0};
+// dont use d4 or else on board led will not work
+int outpins[] = {D0, D5, D6, D7, D8 };
+#define NPINS 5
+#define LED_ON digitalWrite(LED_BUILTIN, LOW)
+#define LED_OFF digitalWrite(LED_BUILTIN, HIGH)
+int val[NPINS] = {0};
+int diff[NPINS] = {0};
+int last[NPINS] = {0};
+int samples[SAMPLES_PER_TRIGGER] = {0};
 int sample = -1;
-int dtime = 50;
 
 void setup() {
-    pinMode(LED_BUILTIN, OUTPUT);
-    digitalWrite(LED_BUILTIN, LOW);
-    for ( int i = 0; i < npins; i++ ) { pinMode( outpins[i], OUTPUT ); }
     Serial.begin(115200);
+    pinMode(LED_BUILTIN, OUTPUT);
+    for ( int i = 0; i < NPINS; i++ ) { pinMode( outpins[i], OUTPUT ); }
+    LED_ON;
     WiFi.begin(ssid, pass);
     while (WiFi.status() != WL_CONNECTED) { delay(1000); Serial.println("Connecting..."); }
-    digitalWrite(LED_BUILTIN, HIGH);
+    LED_OFF;
 }
 
-void trigger(String msg) {
+void sendState(String state, String msg) {
     HTTPClient http;
     http.begin(endpoint);
     http.addHeader("Authorization", String("Bearer ") + llat);
     http.addHeader("Content-Type", "application/json");
-    String data = "{\"state\": \"triggered\", \"attributes\": {\"msg\": \"" + msg + "\"}}";
+    String data = "{\"state\": \"" + state + "\", \"attributes\": {\"msg\": \"" + msg + "\"}}";
     int response = http.POST(data);
     String payload = http.getString();
-    Serial.println(String("Home Assistant Response Code: ") + String(response) + " payload: " + payload + " data: " + data);
+    Serial.println(String("Home Assistant Response Code: ") + String(response) + "\npayload:\n\t" + payload + "\ndata:\n\t" + data);
 }
 
 void resetSamples() {
@@ -50,46 +53,42 @@ void resetSamples() {
     Serial.println("Samples reset");
 }
 
-String logValues() {
-    String msg = "";
-    for ( int i = 0; i < npins; i++ ) {
-        msg += "Samples: " + String(sample+1) + " ";
-        msg += "Location: " + String(i) + " Diff: " + String(diff[i]) + " Val: "  + String(val[i]) + "\n";
+void logValues(String m="") {
+    String msg = "Buffered Time Samples: " + String(sample+1) + "\n\t";
+    for ( int i = 0; i < NPINS; i++ ) {
+        msg += "Location: " + String(i) + " Val: "  + String(val[i]) + " Diff: " + String(diff[i]) + "\n\t";
     }
-    Serial.println(msg);
-    return msg;
+    Serial.println(m + msg);
 }
 
-String checkMovements() {
-    String msg = "";
-    for ( int i = 0; i < npins; i++ ) {
+bool readValues() {
+    bool detected = false;
+    for ( int i = 0; i < NPINS; i++ ) {
         digitalWrite(outpins[i], HIGH);
-        val[i] = analogRead(A0);
+        diff[i] = val[i] - analogRead(A0);
         digitalWrite(outpins[i], LOW);
-        diff[i] = last[i] - val[i];
-        if (diff[i] >= movementthresh || diff[i] * -1 >= movementthresh) {
-            msg += "Movement at location " + String(i) + " Diff: " + String(diff[i]) + " >= " + String(movementthresh) + "\n";
+        val[i] = val[i] - diff[i];
+        if (diff[i] >= SAMPLE_DETECT_THRESHOLD || diff[i] * -1 >= SAMPLE_DETECT_THRESHOLD) {
+            //Serial.println("Sample passed threshold at location " + String(i) + " Diff: " + String(diff[i]) + " >= " + String(SAMPLE_DETECT_THRESHOLD) + "\n");
+            detected = true;
         }
-        last[i] = val[i];
     }
-    return msg;
+    return detected;
 }
 
 void loop() {
     int time = millis();
-    if ( sample >= 0 && time - samples[sample] >= timeout ) resetSamples;
-    auto msg = checkMovements();
-    if (msg != "") {
-        logValues();
+    if ( sample >= 0 && time - samples[sample] >= SAMPLES_RESET_TIMEOUT ) resetSamples();
+    if (readValues()) {
         samples[++sample] = time;
     }
-    if (sample+1 >= samplethresh) {
+    if (sample+1 >= SAMPLES_PER_TRIGGER) {
         logValues();
-        Serial.println(msg);
-        digitalWrite(LED_BUILTIN, LOW);
-        trigger("triggered at time " + String(time));
-        digitalWrite(LED_BUILTIN, HIGH);
+        LED_ON;
+        sendState("triggered", "running time: " + String(time));
+        delay(100);
+        LED_OFF;
         resetSamples();
     }
-    delay(dtime);
+    delay(SAMPLE_RATE);
 }
